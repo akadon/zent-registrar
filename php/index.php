@@ -2,10 +2,11 @@
 
 declare(strict_types=1);
 
-$config = require __DIR__ . '/config.php';
-if (!$config) {
-    $config = require __DIR__ . '/config.example.php';
+$configPath = __DIR__ . '/config.php';
+if (!file_exists($configPath)) {
+    $configPath = __DIR__ . '/config.example.php';
 }
+$config = require $configPath;
 
 $dsn = sprintf(
     'pgsql:host=%s;port=%s;dbname=%s',

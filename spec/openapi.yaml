@@ -243,7 +243,7 @@ paths:
                   status:
                     type: string
                     enum: [online, degraded, offline]
-                  lastSeen:
+                  last_seen:
                     type: string
                     format: date-time
 
@@ -332,16 +332,16 @@ components:
           type: string
         name:
           type: string
-        apiUrl:
+        api_url:
           type: string
-        wsUrl:
+        ws_url:
           type: string
-        voiceUrl:
+        voice_url:
           type: string
           nullable: true
-        voiceProvider:
+        voice_provider:
           type: string
-        cdnUrl:
+        cdn_url:
           type: string
           nullable: true
         protocols:
@@ -356,22 +356,22 @@ components:
         icon:
           type: string
           nullable: true
-        userCount:
+        user_count:
           type: integer
-        channelCount:
+        channel_count:
           type: integer
         verified:
           type: boolean
         status:
           type: string
           enum: [online, degraded, offline]
-        lastSeen:
+        last_seen:
           type: string
           format: date-time
         version:
           type: string
           nullable: true
-        createdAt:
+        created_at:
           type: string
           format: date-time
 
@@ -382,13 +382,13 @@ components:
           type: integer
         domain:
           type: string
-        userId:
+        user_id:
           type: string
         rating:
           type: integer
         comment:
           type: string
           nullable: true
-        createdAt:
+        created_at:
           type: string
           format: date-time
