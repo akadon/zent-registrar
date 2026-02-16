@@ -1,0 +1,10 @@
+{
+  "name": "akadon/zent-registrar",
+  "description": "Zent federation server directory - PHP reference implementation",
+  "type": "project",
+  "require": {
+    "php": ">=8.1",
+    "ext-pdo": "*",
+    "ext-pdo_pgsql": "*"
+  }
+}

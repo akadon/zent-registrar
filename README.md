@@ -2,33 +2,35 @@
 
 Federation server registry. Zent instances register here to discover each other for cross-server communication.
 
-Fastify 5, PostgreSQL (Drizzle ORM), Redis.
-
-```bash
-npm install
-npm run dev
-```
+PHP 8.3+, PDO, PostgreSQL. Port 5000.
 
 ## Database
 
-**`registry_servers`** - registered Zent instances:
-- Identity: id, name, domain (unique), apiUrl, wsUrl
-- Protocol: protocols (JSON array), capabilities (JSON object)
-- Metadata: description, icon, banner, tags, languages (default: `['en']`)
-- Stats: userCount, channelCount
-- Trust: verified (bool), publicKey, reputation (float, default 50), ratingCount, ratingSum
-- Status: status (default 'online'), lastSeen, lastHealthCheck
-- Registration: isPublic (default true), requiresInvite (default false), contactEmail, privacyPolicyUrl, termsOfServiceUrl
-- Auth: serverToken
+**`servers`** - registered Zent instances:
+- Identity: domain (PK), name, api_url, ws_url, voice_url, voice_provider, cdn_url
+- Protocol: protocols (JSONB), capabilities (JSONB)
+- Metadata: description, icon, version
+- Stats: user_count, channel_count
+- Trust: verified (bool)
+- Status: status (default 'online'), last_seen
+- Auth: server_token
+- Timestamps: created_at
 
-**`registry_ratings`** - user ratings for servers:
-- serverId, userId, rating (integer), comment, createdAt
+**`ratings`** - user ratings for servers:
+- id (serial PK), domain (FK), user_id, rating (1-5), comment, created_at
+
+**`rate_limits`** - per-IP rate limiting:
+- ip, endpoint (composite PK), window_start, request_count
 
 ## API
 
-- `GET /servers` - list public servers (search, filter, sort)
-- `POST /servers` - register a new instance (generates server token)
-- `GET /servers/:id` - server details
-- `PUT /servers/:id` - update server info
-- `DELETE /servers/:id` - unregister
-- `POST /servers/:id/rate` - submit a rating
+- `GET /servers` - list servers (search, sort, limit, offset)
+- `POST /servers` - register a new instance (returns server token)
+- `GET /servers/:domain` - server details
+- `PUT /servers/:domain` - update server info (auth required)
+- `DELETE /servers/:domain` - unregister (auth required)
+- `POST /servers/:domain/heartbeat` - heartbeat with optional stats (auth required)
+- `GET /servers/:domain/health` - public health status
+- `POST /servers/:domain/rate` - submit a rating
+- `GET /servers/:domain/ratings` - list ratings with average
+- `GET /health` - service health check
