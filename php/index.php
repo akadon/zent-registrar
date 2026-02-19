@@ -9,7 +9,7 @@ if (!file_exists($configPath)) {
 $config = require $configPath;
 
 $dsn = sprintf(
-    'pgsql:host=%s;port=%s;dbname=%s',
+    'mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4',
     $config['db']['host'],
     $config['db']['port'],
     $config['db']['name']
@@ -18,6 +18,7 @@ $dsn = sprintf(
 $pdo = new PDO($dsn, $config['db']['user'], $config['db']['pass'], [
     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    PDO::ATTR_EMULATE_PREPARES => false,
 ]);
 
 // Run schema on first start
@@ -40,7 +41,14 @@ if (strlen($rawBody) > 65536) {
 $body = json_decode($rawBody, true) ?? [];
 
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
+
+$corsAllowlist = ['https://3aka.com', 'https://reg.3aka.com'];
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+if (in_array($origin, $corsAllowlist, true)) {
+    header("Access-Control-Allow-Origin: $origin");
+} else {
+    header('Access-Control-Allow-Origin: https://3aka.com');
+}
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 
@@ -56,6 +64,15 @@ function json_response(int $status, mixed $data): void {
     exit;
 }
 
+function get_client_ip(): string {
+    $forwarded = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '';
+    if ($forwarded) {
+        $ips = array_map('trim', explode(',', $forwarded));
+        if (!empty($ips[0])) return $ips[0];
+    }
+    return $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+}
+
 function get_bearer_token(): ?string {
     $header = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
     if (str_starts_with($header, 'Bearer ')) {
@@ -68,19 +85,22 @@ function verify_server_token(PDO $pdo, string $domain, ?string $token): void {
     if (!$token) {
         json_response(401, ['error' => 'Missing authorization']);
     }
-    $stmt = $pdo->prepare('SELECT server_token FROM servers WHERE domain = ?');
+    $stmt = $pdo->prepare('SELECT server_token, token_expires_at FROM servers WHERE domain = ?');
     $stmt->execute([$domain]);
     $row = $stmt->fetch();
     if (!$row || !hash_equals($row['server_token'], $token)) {
         json_response(401, ['error' => 'Invalid token']);
     }
+    if ($row['token_expires_at'] !== null && strtotime($row['token_expires_at']) < time()) {
+        json_response(401, ['error' => 'Token expired']);
+    }
 }
 
 function check_rate_limit(PDO $pdo, string $endpoint, int $maxRequests = 30, int $windowSeconds = 60): void {
     if (random_int(1, 100) === 1) {
-        $pdo->exec("DELETE FROM rate_limits WHERE window_start < NOW() - INTERVAL '1 hour'");
+        $pdo->exec("DELETE FROM rate_limits WHERE window_start < NOW() - INTERVAL 1 HOUR");
     }
-    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $ip = get_client_ip();
     $stmt = $pdo->prepare('SELECT request_count, window_start FROM rate_limits WHERE ip = ? AND endpoint = ?');
     $stmt->execute([$ip, $endpoint]);
     $row = $stmt->fetch();
@@ -135,8 +155,8 @@ if ($method === 'POST' && $uri === '/servers') {
     $token = bin2hex(random_bytes(32));
 
     $stmt = $pdo->prepare('
-        INSERT INTO servers (domain, name, api_url, ws_url, voice_url, voice_provider, cdn_url, protocols, capabilities, description, icon, version, server_token)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?)
+        INSERT INTO servers (domain, name, api_url, ws_url, voice_url, voice_provider, cdn_url, protocols, capabilities, description, icon, version, server_token, token_expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW() + INTERVAL 1 YEAR)
     ');
     $stmt->execute([
         $body['domain'],
@@ -164,17 +184,18 @@ if ($method === 'GET' && $uri === '/servers') {
     $offset = max(0, (int)($_GET['offset'] ?? 0));
     $sortMap = ['user_count' => 'user_count DESC', 'created_at' => 'created_at DESC', 'name' => 'name ASC'];
     $sort = $_GET['sort'] ?? 'user_count';
+    if (!is_string($sort)) $sort = 'user_count';
     $orderClause = $sortMap[$sort] ?? 'user_count DESC';
 
     if ($search) {
         $stmt = $pdo->prepare("
             SELECT domain, name, api_url, ws_url, voice_url, voice_provider, cdn_url, protocols, capabilities, description, icon, user_count, channel_count, verified, status, last_seen, version, created_at
-            FROM servers WHERE (name ILIKE ? OR domain ILIKE ?) ORDER BY $orderClause LIMIT ? OFFSET ?
+            FROM servers WHERE (name LIKE ? OR domain LIKE ?) ORDER BY $orderClause LIMIT ? OFFSET ?
         ");
         $like = "%$search%";
         $stmt->execute([$like, $like, $limit, $offset]);
 
-        $countStmt = $pdo->prepare('SELECT COUNT(*) FROM servers WHERE (name ILIKE ? OR domain ILIKE ?)');
+        $countStmt = $pdo->prepare('SELECT COUNT(*) FROM servers WHERE (name LIKE ? OR domain LIKE ?)');
         $countStmt->execute([$like, $like]);
     } else {
         $stmt = $pdo->prepare("
@@ -193,6 +214,11 @@ if ($method === 'GET' && $uri === '/servers') {
         $s['verified'] = (bool)$s['verified'];
         $s['user_count'] = (int)$s['user_count'];
         $s['channel_count'] = (int)$s['channel_count'];
+        // Override status to offline if no heartbeat in 5 minutes
+        $lastSeen = strtotime($s['last_seen'] ?? '');
+        if ($lastSeen !== false && (time() - $lastSeen) > 300) {
+            $s['status'] = 'offline';
+        }
     }
 
     json_response(200, ['servers' => $servers, 'total' => (int)$countStmt->fetchColumn()]);
@@ -243,11 +269,11 @@ if (preg_match('#^/servers/([^/]+)$#', $uri, $m)) {
         }
 
         if (!empty($body['protocols'])) {
-            $fields[] = 'protocols = ?::jsonb';
+            $fields[] = 'protocols = ?';
             $values[] = json_encode($body['protocols']);
         }
         if (array_key_exists('capabilities', $body)) {
-            $fields[] = 'capabilities = ?::jsonb';
+            $fields[] = 'capabilities = ?';
             $values[] = json_encode($body['capabilities']);
         }
 
@@ -277,7 +303,7 @@ if (preg_match('#^/servers/([^/]+)/heartbeat$#', $uri, $m) && $method === 'POST'
     $domain = $m[1];
     verify_server_token($pdo, $domain, get_bearer_token());
 
-    $updates = ['last_seen = NOW()', "status = 'online'"];
+    $updates = ['last_seen = NOW()', "status = 'online'", 'token_expires_at = NOW() + INTERVAL 1 YEAR'];
     $values = [];
 
     if (isset($body['userCount'])) {
