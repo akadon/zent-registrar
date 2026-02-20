@@ -68,11 +68,10 @@ function json_response(int $status, mixed $data): void {
 }
 
 function get_client_ip(): string {
-    $forwarded = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '';
-    if ($forwarded) {
-        $ips = array_map('trim', explode(',', $forwarded));
-        if (!empty($ips[0])) return $ips[0];
-    }
+    // Prefer Cloudflare's verified header (cannot be spoofed)
+    $cfIp = $_SERVER['HTTP_CF_CONNECTING_IP'] ?? '';
+    if ($cfIp) return $cfIp;
+    // Fallback to REMOTE_ADDR (direct connection)
     return $_SERVER['REMOTE_ADDR'] ?? 'unknown';
 }
 
@@ -304,7 +303,7 @@ if (preg_match('#^/servers/([^/]+)/heartbeat$#', $uri, $m) && $method === 'POST'
     $domain = $m[1];
     verify_server_token($pdo, $domain, get_bearer_token());
 
-    $updates = ['last_seen = NOW()', "status = 'online'", 'token_expires_at = DATE_ADD(created_at, INTERVAL 1 YEAR)'];
+    $updates = ['last_seen = NOW()', "status = 'online'", 'token_expires_at = DATE_ADD(NOW(), INTERVAL 1 YEAR)'];
     $values = [];
 
     if (isset($body['userCount'])) {
@@ -346,6 +345,13 @@ if (preg_match('#^/servers/([^/]+)/rate$#', $uri, $m) && $method === 'POST') {
     $domain = $m[1];
     check_rate_limit($pdo, 'rate', 10, 60);
 
+    // Require server token auth to prevent unauthenticated vote manipulation
+    $ratingDomain = $body['fromDomain'] ?? null;
+    if (!$ratingDomain) {
+        json_response(400, ['error' => 'fromDomain required']);
+    }
+    verify_server_token($pdo, $ratingDomain, get_bearer_token());
+
     $stmt = $pdo->prepare('SELECT 1 FROM servers WHERE domain = ?');
     $stmt->execute([$domain]);
     if (!$stmt->fetch()) json_response(404, ['error' => 'Server not found']);
@@ -360,8 +366,16 @@ if (preg_match('#^/servers/([^/]+)/rate$#', $uri, $m) && $method === 'POST') {
 
     $rating = max(1, min(5, (int)$body['rating']));
 
-    $stmt = $pdo->prepare('INSERT INTO ratings (domain, user_id, rating, comment) VALUES (?, ?, ?, ?)');
-    $stmt->execute([$domain, $body['userId'], $rating, $body['comment'] ?? null]);
+    // Upsert — one rating per user per domain
+    $stmt = $pdo->prepare('SELECT id FROM ratings WHERE domain = ? AND user_id = ?');
+    $stmt->execute([$domain, $body['userId']]);
+    if ($stmt->fetch()) {
+        $stmt = $pdo->prepare('UPDATE ratings SET rating = ?, comment = ?, created_at = NOW() WHERE domain = ? AND user_id = ?');
+        $stmt->execute([$rating, $body['comment'] ?? null, $domain, $body['userId']]);
+    } else {
+        $stmt = $pdo->prepare('INSERT INTO ratings (domain, user_id, rating, comment) VALUES (?, ?, ?, ?)');
+        $stmt->execute([$domain, $body['userId'], $rating, $body['comment'] ?? null]);
+    }
 
     json_response(201, ['created' => true]);
 }
