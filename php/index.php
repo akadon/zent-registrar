@@ -22,7 +22,10 @@ $pdo = new PDO($dsn, $config['db']['user'], $config['db']['pass'], [
 ]);
 
 // Run schema on first start
-$pdo->exec(file_get_contents(__DIR__ . '/schema.sql'));
+$tableExists = $pdo->query("SHOW TABLES LIKE 'servers'")->rowCount() > 0;
+if (!$tableExists) {
+    $pdo->exec(file_get_contents(__DIR__ . '/schema.sql'));
+}
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -97,9 +100,6 @@ function verify_server_token(PDO $pdo, string $domain, ?string $token): void {
 }
 
 function check_rate_limit(PDO $pdo, string $endpoint, int $maxRequests = 30, int $windowSeconds = 60): void {
-    if (random_int(1, 100) === 1) {
-        $pdo->exec("DELETE FROM rate_limits WHERE window_start < NOW() - INTERVAL 1 HOUR");
-    }
     $ip = get_client_ip();
     $stmt = $pdo->prepare('SELECT request_count, window_start FROM rate_limits WHERE ip = ? AND endpoint = ?');
     $stmt->execute([$ip, $endpoint]);
@@ -108,6 +108,7 @@ function check_rate_limit(PDO $pdo, string $endpoint, int $maxRequests = 30, int
     if ($row) {
         $windowStart = strtotime($row['window_start']);
         if ($windowStart !== false && (time() - $windowStart) > $windowSeconds) {
+            $pdo->prepare('DELETE FROM rate_limits WHERE window_start < NOW() - INTERVAL ? SECOND')->execute([$windowSeconds]);
             $stmt = $pdo->prepare('UPDATE rate_limits SET request_count = 1, window_start = NOW() WHERE ip = ? AND endpoint = ?');
             $stmt->execute([$ip, $endpoint]);
             return;
@@ -303,7 +304,7 @@ if (preg_match('#^/servers/([^/]+)/heartbeat$#', $uri, $m) && $method === 'POST'
     $domain = $m[1];
     verify_server_token($pdo, $domain, get_bearer_token());
 
-    $updates = ['last_seen = NOW()', "status = 'online'", 'token_expires_at = NOW() + INTERVAL 1 YEAR'];
+    $updates = ['last_seen = NOW()', "status = 'online'", 'token_expires_at = DATE_ADD(created_at, INTERVAL 1 YEAR)'];
     $values = [];
 
     if (isset($body['userCount'])) {
